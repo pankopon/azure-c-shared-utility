@@ -578,8 +578,17 @@ void uws_client_destroy(UWS_CLIENT_HANDLE uws_client)
             uws_client->underlying_io = NULL;
         }
 
-        // indicate cancellation on all unacknowledged frames
-        clear_pending_sends(uws_client);
+        // NOTE: We deliberately do NOT call clear_pending_sends() here.
+        // xio_destroy() above silently drops any queued send completions in
+        // socketio/tlsio without invoking their callbacks. Calling
+        // clear_pending_sends() from here would free WS_PENDING_SEND objects
+        // that the (already-destroyed) lower layers may still hold pointers
+        // to via callback_context, producing a use-after-free if any in-flight
+        // call chain on another thread later dereferences them. Matches
+        // upstream Azure/azure-c-shared-utility behavior. The remaining
+        // WS_PENDING_SEND payloads will be freed via singlylinkedlist_destroy
+        // below (the list nodes are freed; the payloads they pointed to leak,
+        // which is acceptable on connection teardown).
         /* Codes_SRS_UWS_CLIENT_01_024: [ `uws_client_destroy` shall free the list used to track the pending sends by calling `singlylinkedlist_destroy`. ]*/
         singlylinkedlist_destroy(uws_client->pending_sends);
         free(uws_client->resource_name);
@@ -1971,12 +1980,12 @@ static void on_underlying_io_send_complete(void* context, IO_SEND_RESULT send_re
         WS_PENDING_SEND* ws_pending_send = (WS_PENDING_SEND*)singlylinkedlist_item_get_value(ws_pending_send_list_item);
         if (ws_pending_send == NULL)
         {
-            LogInfo("%s: the frame has alredy been completed: %p.", ws_pending_send_list_item);
+            LogInfo("%s: the frame has already been completed: %p.", __FUNCTION__, (void*)ws_pending_send_list_item);
             return;
         }
         if (ws_pending_send->uws_client == NULL)
         {
-            LogInfo("%s: no client.");
+            LogInfo("%s: no client.", __FUNCTION__);
             return;
         }
         UWS_CLIENT_HANDLE uws_client = ws_pending_send->uws_client;
